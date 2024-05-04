@@ -356,38 +356,65 @@ function! s:Toc(...)
     endif
 
 
+    let l:bufnr = bufnr('%')
     let l:cursor_line = line('.')
     let l:cursor_header = 0
-    let l:header_list = s:GetHeaderList()
-    let l:indented_header_list = []
-    if len(l:header_list) == 0
-        echom 'Toc: No headers.'
-        return
-    endif
+    let l:fenced_block = 0
+    let l:front_matter = 0
+    let l:header_list = []
     let l:header_max_len = 0
-    let l:vim_markdown_toc_autofit = get(g:, 'vim_markdown_toc_autofit', 0)
-    for h in l:header_list
-        " set header number of the cursor position
-        if l:cursor_header == 0
-            let l:header_line = h.lnum
-            if l:header_line == l:cursor_line
-                let l:cursor_header = index(l:header_list, h) + 1
-            elseif l:header_line > l:cursor_line
-                let l:cursor_header = index(l:header_list, h)
+    let l:vim_markdown_toc_autofit = get(g:, "vim_markdown_toc_autofit", 0)
+    let l:vim_markdown_frontmatter = get(g:, "vim_markdown_frontmatter", 0)
+    for i in range(1, line('$'))
+        let l:lineraw = getline(i)
+        let l:l1 = getline(i+1)
+        let l:line = substitute(l:lineraw, "#", "\\\#", "g")
+        if l:line =~ '````*' || l:line =~ '\~\~\~\~*'
+            if l:fenced_block == 0
+                let l:fenced_block = 1
+            elseif l:fenced_block == 1
+                let l:fenced_block = 0
+            endif
+        elseif l:vim_markdown_frontmatter == 1
+            if l:front_matter == 1
+                if l:line == '---'
+                    let l:front_matter = 0
+                endif
+            elseif i == 1
+                if l:line == '---'
+                    let l:front_matter = 1
+                endif
             endif
         endif
-        " indent header based on level
-        let l:text = repeat('  ', h.level-1) . h.text
-        " keep track of the longest header size (heading level + title)
-        let l:total_len = strdisplaywidth(l:text)
-        if l:total_len > l:header_max_len
-            let l:header_max_len = l:total_len
+        if l:line =~ '^#\+' || (l:l1 =~ '^=\+\s*$' || l:l1 =~ '^-\+\s*$') && l:line =~ '^\S'
+            let l:is_header = 1
+        else
+            let l:is_header = 0
         endif
-        " append indented line to list
-        let l:item = {'lnum': h.lnum, 'text': l:text, 'valid': 1, 'bufnr': h.bufnr, 'col': 1}
-        let l:indented_header_list = l:indented_header_list + [l:item]
+        if l:is_header == 1 && l:fenced_block == 0 && l:front_matter == 0
+            " append line to location list
+            let l:item = {'lnum': i, 'text': l:line, 'valid': 1, 'bufnr': l:bufnr, 'col': 1}
+            let l:header_list = l:header_list + [l:item]
+            " set header number of the cursor position
+            if l:cursor_header == 0
+                if i == l:cursor_line
+                    let l:cursor_header = len(l:header_list)
+                elseif i > l:cursor_line
+                    let l:cursor_header = len(l:header_list) - 1
+                endif
+            endif
+            " keep track of the longest header size (heading level + title)
+            let l:total_len = stridx(l:line, ' ') + strdisplaywidth(l:line)
+            if l:total_len > l:header_max_len
+                let l:header_max_len = l:total_len
+            endif
+        endif
     endfor
-    call setloclist(0, l:indented_header_list)
+    call setloclist(0, l:header_list)
+    if len(l:header_list) == 0
+        echom "Toc: No headers."
+        return
+    endif
 
     if l:window_type ==# 'horizontal'
         lopen
@@ -395,8 +422,7 @@ function! s:Toc(...)
         vertical lopen
         " auto-fit toc window when possible to shrink it
         if (&columns/2) > l:header_max_len && l:vim_markdown_toc_autofit == 1
-            " header_max_len + 1 space for first header + 3 spaces for line numbers
-            execute 'vertical resize ' . (l:header_max_len + 1 + 3)
+            execute 'vertical resize ' . (l:header_max_len + 1)
         else
             execute 'vertical resize ' . (&columns/2)
         endif
@@ -406,10 +432,44 @@ function! s:Toc(...)
         lopen
     endif
     setlocal modifiable
+    let l:numheader = ['', '', '', '', '', '', ''] " *ADDED*
+    let l:prevlevel = 0 " *ADDED*
+    let l:level = 0
     for i in range(1, line('$'))
         " this is the location-list data for the current item
         let d = getloclist(0)[i-1]
-        call setline(i, d.text)
+        " atx headers
+        if match(d.text, "^#") > -1
+            let l:prevlevel = l:level " *ADDED*
+            let l:level = len(matchstr(d.text, '#*', 'g'))-1
+            let d.text = substitute(d.text, '\v^#*[ ]*', '', '')
+            let d.text = substitute(d.text, '\v[ ]*#*$', '', '')
+            " fill the numheader list " *ADDED*
+            if l:prevlevel < l:level " *ADDED*
+                let l:numheader[l:level] = 1 " *ADDED*
+            elseif l:prevlevel > l:level " *ADDED*
+                let l:numheader[l:level] += 1 " *ADDED*
+                " clean numheader
+                for j in [1,2,3,4,5,6] " *ADDED*
+                    if j > l:level " *ADDED*
+                        let l:numheader[j] = '' " *ADDED*
+                    endif " *ADDED*
+                endfor " *ADDED*
+            else " *ADDED*
+                let l:numheader[l:level] += 1 " *ADDED*
+            endif " *ADDED*
+        " setex headers
+        else
+            let l:next_line = getbufline(d.bufnr, d.lnum+1)
+            if match(l:next_line, "=") > -1
+                let l:level = 0
+            elseif match(l:next_line, "-") > -1
+                let l:level = 1
+            endif
+        endif
+        let l:concatnumheader = join(l:numheader, '.') " *ADDED*
+        let l:concatnumheader = substitute(l:concatnumheader, '\.\+$', '', '') " *ADDED*
+        call setline(i, repeat('  ', l:level). l:concatnumheader.'  '. d.text)
     endfor
     setlocal nomodified
     setlocal nomodifiable
@@ -905,3 +965,4 @@ augroup Mkd
     autocmd InsertEnter,InsertLeave <buffer> call s:MarkdownRefreshSyntax(0)
     autocmd CursorHold,CursorHoldI <buffer> call s:MarkdownRefreshSyntax(0)
 augroup END
+
